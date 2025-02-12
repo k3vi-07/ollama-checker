@@ -1,0 +1,39 @@
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w  # 减小二进制体积
+      - -X main.version={{.Version}}
+      - -X main.commit={{.Commit}}
+      - -X main.buildDate={{.Date}}
+    goos:
+      - linux
+      - windows
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - format: tar.gz
+    format_overrides:
+    - goos: windows
+      format: zip
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  name_template: "{{ .Tag }}-SNAPSHOT"
+
+release:
+  name_template: "v{{.Version}}"
+  prerelease: auto
+  github:
+    owner: k3vi-07
+    name: ollama-checker
+
