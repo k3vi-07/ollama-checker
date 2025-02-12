@@ -1,2 +1,12 @@
-dist/
-*.log 
+# 构建产物
+/dist/
+/ollama-checker
+
+# 日志文件
+/logs/
+*.log
+
+# 开发环境文件
+.env
+.idea/
+.vscode/ 
