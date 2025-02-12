@@ -28,7 +28,7 @@ checksum:
   name_template: 'checksums.txt'
 
 snapshot:
-  name_template: "{{ .Tag }}-SNAPSHOT"
+  name_template: "{{ .Tag }}-{{ .Commit }}-SNAPSHOT"
 
 release:
   name_template: "v{{.Version}}"
@@ -37,3 +37,12 @@ release:
     owner: k3vi-07
     name: ollama-checker
 
+changelog:
+  sort: asc
+  groups:
+    - title: 新功能
+      regexp: "^feat:"
+      order: 0
+    - title: 问题修复
+      regexp: "^fix:"
+      order: 1

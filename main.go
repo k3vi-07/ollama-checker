@@ -36,6 +36,9 @@ type APIStatus struct {
 var (
 	mainLogger *log.Logger // 主日志记录器
 	netLogger  *log.Logger // 网络日志记录器
+	version    = "dev"     // 默认开发版本
+	commit     = "none"    // 默认无提交信息
+	buildDate  = "unknown" // 默认未知构建时间
 )
 
 var failures atomic.Int32
@@ -143,6 +146,17 @@ func worker(ctx context.Context, wg *sync.WaitGroup, jobs <-chan string, results
 }
 
 func main() {
+	showVersion := flag.Bool("version", false, "显示版本信息")
+	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("版本: %s\n提交: %s\n构建时间: %s\n",
+			version,
+			commit,
+			buildDate)
+		os.Exit(0)
+	}
+
 	// 初始化日志
 	logFile := initLogging()
 	defer logFile.Close()
