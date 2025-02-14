@@ -18,6 +18,12 @@ builds:
     ldflags:
       - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.buildDate={{.Date}}
 
+# 正确的位置应该在 release 块中
+release:
+  github:
+    owner: "k3vi-07"  # 你的GitHub用户名
+    name: "ollama-checker"  # 仓库名称
+
 archives:
   - format: zip
     name_template: "ollama-checker_{{.Version}}_{{.Os}}_{{.Arch}}"
