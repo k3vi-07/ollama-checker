@@ -2,20 +2,18 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"context"
+	"encoding/csv"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/http/httputil"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
@@ -31,17 +29,26 @@ type APIStatus struct {
 	URL     string
 	Healthy bool
 	Error   string
+	Models  []string
+}
+
+type ModelInfo struct {
+	Name       string `json:"name"`
+	ModifiedAt string `json:"modified_at"`
+	Size       int64  `json:"size"`
+}
+
+type TagsResponse struct {
+	Models []ModelInfo `json:"models"`
 }
 
 var (
-	mainLogger *log.Logger // 主日志记录器
-	netLogger  *log.Logger // 网络日志记录器
-	version    = "dev"     // 默认开发版本
-	commit     = "none"    // 默认无提交信息
-	buildDate  = "unknown" // 默认未知构建时间
+	mainLogger *log.Logger
+	netLogger  *log.Logger
+	version    = "dev"
+	commit     = "none"
+	buildDate  = "unknown"
 )
-
-var failures atomic.Int32
 
 func initLogging() *os.File {
 	logDir := "logs"
@@ -55,14 +62,10 @@ func initLogging() *os.File {
 		log.Fatalf("创建日志文件失败: %v", err)
 	}
 
-	// 主日志（错误和成功）：仅写入文件
-	mainLogger = log.New(logFile, "", log.LstdFlags|log.Lshortfile)
-
-	// 网络日志：单独记录
-	netLogger = log.New(logFile, "", log.LstdFlags|log.Lshortfile)
-
-	// 终端输出单独处理
-	log.SetOutput(os.Stdout) // 标准log包用于进度显示
+	// 修改日志输出配置，确保网络日志同时输出到终端
+	multiWriter := io.MultiWriter(logFile, os.Stdout)
+	mainLogger = log.New(io.MultiWriter(logFile), "[MAIN] ", log.LstdFlags|log.Lshortfile) // 仅输出到文件
+	netLogger = log.New(multiWriter, "[NET] ", log.LstdFlags|log.Lshortfile)               // 同时输出到文件和终端
 
 	return logFile
 }
@@ -72,92 +75,127 @@ func checkAPI(ctx context.Context, url string) *APIStatus {
 		Timeout: 5 * time.Second,
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-	defer cancel()
-
 	req, err := http.NewRequestWithContext(ctx, "GET", url+"/api/tags", nil)
 	if err != nil {
-		mainLogger.Printf("[ERROR] 创建请求失败: %s (%v)", url, err)
+		mainLogger.Printf("创建请求失败: %s (%v)", url, err)
 		return &APIStatus{URL: url, Healthy: false, Error: err.Error()}
 	}
 
-	req.Header.Set("Accept", "application/json")
-	req.Header.Set("User-Agent", "Ollama-Checker/2.2")
-
-	// 修改网络日志记录方式
-	reqDump, _ := httputil.DumpRequestOut(req, false)
-	netLogger.Printf("[NET] 请求 → %s\n%s", url, string(reqDump))
-
-	resp, err := client.Do(req)
-	if err != nil {
-		mainLogger.Printf("[ERROR] 网络错误: %s (%v)", url, err)
-		return &APIStatus{URL: url, Healthy: false, Error: err.Error()}
-	}
-	defer resp.Body.Close()
-
-	respDump, _ := httputil.DumpResponse(resp, false)
-	netLogger.Printf("[NET] 响应 ← %s\n%s", url, string(respDump))
-
-	// 记录响应体（最多1KB）
-	var bodyBuffer bytes.Buffer
-	teeReader := io.TeeReader(resp.Body, &bodyBuffer)
-	body, _ := io.ReadAll(io.LimitReader(teeReader, 1024))
-	resp.Body = io.NopCloser(teeReader)
-
-	if resp.StatusCode != http.StatusOK {
-		mainLogger.Printf("[ERROR] 异常状态码: %s (%d)\n响应体: %s",
-			url, resp.StatusCode, string(body))
-		return &APIStatus{URL: url, Healthy: false,
-			Error: fmt.Sprintf("HTTP %d: %s", resp.StatusCode, string(body))}
-	}
-
-	var health HealthResponse
-	if err := json.NewDecoder(io.MultiReader(bytes.NewReader(body), resp.Body)).Decode(&health); err != nil {
-		mainLogger.Printf("[ERROR] JSON解析失败: %s\n原始响应: %s", url, string(body))
-		return &APIStatus{URL: url, Healthy: false, Error: "invalid JSON: " + err.Error()}
-	}
-
-	if len(health.Models) == 0 {
-		return &APIStatus{URL: url, Healthy: false, Error: "no available models"}
-	}
-
-	hasValidModel := false
-	for _, model := range health.Models {
-		if model.Name != "" && model.Digest != "" {
-			hasValidModel = true
+	// 添加重试机制
+	var resp *http.Response
+	for retry := 0; retry < 3; retry++ {
+		resp, err = client.Do(req)
+		if err == nil {
 			break
 		}
-	}
-	if !hasValidModel {
-		return &APIStatus{URL: url, Healthy: false, Error: "no valid models"}
+		time.Sleep(time.Duration(retry+1) * 500 * time.Millisecond)
 	}
 
-	mainLogger.Printf("[SUCCESS] 有效节点: %s (模型数: %d)", url, len(health.Models))
-	return &APIStatus{URL: url, Healthy: true}
+	// 优化响应体处理
+	defer func() {
+		if resp != nil && resp.Body != nil {
+			io.Copy(io.Discard, resp.Body) // 确保连接可重用
+			resp.Body.Close()
+		}
+	}()
+
+	if err != nil {
+		mainLogger.Printf("请求失败: %s (%v)", url, err)
+		return &APIStatus{URL: url, Healthy: false, Error: err.Error()}
+	}
+
+	if resp.StatusCode != http.StatusOK {
+		netLogger.Printf("非200响应: %s (%d)", url, resp.StatusCode)
+		return &APIStatus{URL: url, Healthy: false, Error: fmt.Sprintf("HTTP %d", resp.StatusCode)}
+	}
+
+	// 新增模型名称解析
+	var tagsResp TagsResponse
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		netLogger.Printf("读取响应失败: %s (%v)", url, err)
+		return &APIStatus{URL: url, Healthy: false, Error: "读取响应体失败"}
+	}
+
+	if err := json.Unmarshal(body, &tagsResp); err != nil {
+		netLogger.Printf("解析JSON失败: %s (%v)", url, err)
+		return &APIStatus{URL: url, Healthy: false, Error: "无效的响应格式"}
+	}
+
+	// 提取模型名称
+	models := make([]string, 0, len(tagsResp.Models))
+	for _, m := range tagsResp.Models {
+		models = append(models, m.Name)
+	}
+
+	return &APIStatus{
+		URL:     url,
+		Healthy: true,
+		Models:  models,
+	}
 }
 
 func worker(ctx context.Context, wg *sync.WaitGroup, jobs <-chan string, results chan<- *APIStatus) {
 	defer wg.Done()
 	for url := range jobs {
-		result := checkAPI(ctx, url)
-		results <- result
-		fmt.Printf("\r\033[33m处理中: %d/%d\033[0m", len(results), cap(results))
+		select {
+		case <-ctx.Done():
+			return
+		default:
+			results <- checkAPI(ctx, url)
+		}
 	}
 }
 
-func main() {
-	showVersion := flag.Bool("version", false, "显示版本信息")
-	flag.Parse()
-
-	if *showVersion {
-		fmt.Printf("版本: %s\n提交: %s\n构建时间: %s\n",
-			version,
-			commit,
-			buildDate)
-		os.Exit(0)
+// 修改导出CSV函数
+func exportToCSV(results []*APIStatus) {
+	if len(results) == 0 {
+		return
 	}
 
-	// 初始化日志
+	filename := fmt.Sprintf("results_%s.csv", time.Now().Format("20060102-150405"))
+	file, err := os.Create(filename)
+	if err != nil {
+		mainLogger.Printf("创建CSV文件失败: %v", err)
+		return
+	}
+	defer file.Close()
+
+	writer := csv.NewWriter(file)
+	defer writer.Flush()
+
+	// 写入CSV头（保持不变）
+	header := []string{"URL", "Model"}
+	if err := writer.Write(header); err != nil {
+		mainLogger.Printf("写入CSV头失败: %v", err)
+		return
+	}
+
+	// 修改数据写入方式
+	for _, status := range results {
+		if status.Healthy {
+			var modelStr string
+			if len(status.Models) == 0 {
+				modelStr = "无模型"
+			} else {
+				modelStr = strings.Join(status.Models, "; ") // 用分号分隔多个模型
+			}
+			record := []string{status.URL, modelStr}
+			if err := writer.Write(record); err != nil {
+				mainLogger.Printf("写入记录失败: %v", err)
+			}
+		}
+	}
+
+	mainLogger.Printf("结果已导出到: %s", filename)
+	fmt.Printf("\n检测结果已保存到: \033[34m%s\033[0m\n", filename)
+}
+
+func main() {
+	// 添加版本信息输出
+	fmt.Printf("Ollama检测器 v%s (构建于 %s)\n", version, buildDate)
+
+	// 初始化配置
 	logFile := initLogging()
 	defer logFile.Close()
 
@@ -192,23 +230,28 @@ func main() {
 	mainLogger.Printf("参数: %v", os.Args)
 	mainLogger.Printf("任务总数: %d", len(urls))
 
-	// 在main函数顶部添加失败计数器
-	var failures atomic.Int32
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	// 修改context创建方式（移除超时设置）
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// 动态调整 worker 数量
+	workerCount := calculateWorkerCount(len(urls))
 	jobs := make(chan string, len(urls))
 	results := make(chan *APIStatus, len(urls))
 
+	// 启动 worker 池
 	var wg sync.WaitGroup
-	for i := 0; i < 10; i++ {
+	for i := 0; i < workerCount; i++ {
 		wg.Add(1)
 		go worker(ctx, &wg, jobs, results)
 	}
 
 	var outputWG sync.WaitGroup
 	outputWG.Add(1)
+
+	// 新增结果收集切片
+	var successfulResults []*APIStatus
+
 	go func() {
 		defer outputWG.Done()
 		var counter int
@@ -217,15 +260,16 @@ func main() {
 			fmt.Print("\033[2K\r")
 			if result.Healthy {
 				fmt.Printf("\033[32m✓\033[0m %s\n", result.URL)
+				fmt.Printf("可用模型: %v\n", result.Models)
+				successfulResults = append(successfulResults, result)
 			} else {
-				failures.Add(1) // 使用原子计数器
+				fmt.Printf("\033[31m✗\033[0m %s\n", result.Error)
 			}
 
 			counter++
-			fmt.Printf("\r\033[33m已处理: %d/%d | 失败: %d\033[0m",
+			fmt.Printf("\r\033[33m已处理: %d/%d\033[0m",
 				counter,
-				len(urls),
-				failures.Load())
+				len(urls))
 		}
 	}()
 
@@ -240,10 +284,26 @@ func main() {
 	outputWG.Wait()
 	fmt.Println("\n检测完成")
 
+	// 导出CSV
+	exportToCSV(successfulResults)
+
 	// 修改最后的统计日志
 	defer func() {
 		mainLogger.Printf("检测完成: 成功%d/失败%d",
-			len(urls)-int(failures.Load()),
-			failures.Load())
+			len(successfulResults),
+			len(urls)-len(successfulResults))
 	}()
+}
+
+func calculateWorkerCount(taskNum int) int {
+	const maxWorkers = 20
+	const minWorkers = 3
+	workers := taskNum / 2
+	if workers < minWorkers {
+		return minWorkers
+	}
+	if workers > maxWorkers {
+		return maxWorkers
+	}
+	return workers
 }

@@ -1,86 +1,105 @@
-# Ollama 服务检测工具
+# Ollama 服务健康检测工具
 
 ![Go Version](https://img.shields.io/badge/go-1.21+-blue)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-用于批量检测 Ollama 服务可用性的命令行工具，支持高并发检测和详细日志记录。
+专为Ollama服务设计的分布式健康检测工具，支持智能并发控制和详细诊断报告。
 
-## 主要功能
+## 核心特性
 
-- ✅ 并发检测多个 Ollama 节点
-- ✅ 支持文件输入和命令行参数双模式
-- ✅ 实时进度显示（已处理数/失败数）
-- ✅ 详细的文件日志记录（含网络请求跟踪）
-- ✅ 严格的服务验证逻辑：
-  - HTTP 状态码检查
-  - JSON 格式验证
-  - 有效模型存在性检查
-  - 3秒请求超时
+### 🚀 检测能力
+- 多节点并行检测（3-20个动态worker）
+- 三级健康验证机制：
+  ```mermaid
+  graph TD
+    A[HTTP状态码] --> B[JSON格式验证]
+    B --> C[模型列表提取]
+  ```
+- 自动重试机制（3次指数退避重试）
 
-## 安装
+### 📊 结果输出
+- 实时终端仪表盘
+  ```
+  ✓ http://node1:11434 (3 models)
+  ✗ http://node2:11434 (连接超时)
+  已处理: 15/20 | 成功率: 75%
+  ```
+- CSV报告自动生成
+  ```csv
+  URL,Model
+  http://node1:11434,llama2; codellama
+  http://node3:11434,mistral
+  ```
 
+### 📁 日志系统
+- 双通道日志记录
+  - `[MAIN]` 主日志（仅文件）
+  - `[NET]` 网络日志（文件+终端）
+- 自动日志轮转（按启动时间命名）
+
+## 快速开始
+
+### 安装方式
 ```bash
-# 从源码编译
-go install github.com/k3vi-07/ollama-checker@latest
+# 源码安装
+go install github.com/yourname/ollama-checker@latest
 
-# 或下载预编译二进制
-https://github.com/k3vi-07/ollama-checker
-chmod +x ollama-checker
+# 二进制安装
+curl -LO https://example.com/ollama-checker && chmod +x ollama-checker
 ```
 
-## 使用说明
-
-### 基本使用
+### 使用示例
 ```bash
-# 从文件读取检测地址
-./ollama-checker -file urls.txt
+# 从文件读取节点列表
+./ollama-checker -file nodes.txt
 
-# 直接指定检测地址
-./ollama-checker http://localhost:11434 http://backup:11434
+# 直接检测指定节点
+./ollama-checker http://node1:11434 http://node2:11434
 
-# 混合模式（文件优先）
-./ollama-checker -file nodes.txt http://fallback:11434
+# 混合模式（文件+命令行参数）
+./ollama-checker -file prod-nodes.txt http://backup:11434
 ```
 
-### 文件格式示例
+### 输入文件格式
 ```text
-# urls.txt
-http://primary:11434    # 生产环境主节点
-http://secondary:11434  # 生产环境备节点
-http://test:11434       # 测试环境节点
+# nodes.txt
+http://primary:11434    # 生产主节点
+http://secondary:11434  # 生产备援
+http://test:11434       # 测试环境
 ```
 
-## 输出示例
-```shell
-✓ http://good-node:11434
-已处理: 15/20 | 失败: 3
-检测完成
+## 高级功能
+
+### 结果导出
+- 自动生成时间戳命名的CSV文件
+- 模型列表分号分隔
+- 支持空模型检测（标记为"无模型"）
+
+### 诊断日志
+```log
+[MAIN] 启动检测器 v2.2 | 节点数: 20
+[NET] 请求 → http://node1:11434/api/tags (重试 2/3)
+[NET] 非200响应: http://node2:11434 (404)
 ```
 
-## 日志系统
-日志文件自动保存在 `logs/` 目录，命名格式为 `YYYYMMDD-HHMMSS.log`
+## 技术规格
 
-```bash
-# 查看实时日志
-tail -f logs/20240520-153045.log
+| 类别         | 参数配置                  |
+|--------------|-------------------------|
+| 并发策略     | 动态计算 (N/2, 3-20)     |
+| 单请求超时   | 5秒                     |
+| 总运行时间   | 无限制（直到任务完成）   |
+| 重试机制     | 3次 (500ms, 1s, 1.5s)  |
+| 内存保护     | 自动回收响应体 (≤1MB)   |
 
-# 典型日志内容
-[NET] 请求 → http://node:11434/api/tags
-[ERROR] 网络错误: http://bad-node:11434 (context deadline exceeded)
-[SUCCESS] 有效节点: http://good-node:11434 (模型数: 3)
-```
+## 贡献指南
 
-## 技术参数
-- 默认并发数：10 worker
-- 单请求超时：3秒
-- 总运行超时：30秒
-- 最大响应体记录：1KB
+1. 提交Issue前请先检查最新日志
+2. 代码需通过 `go test -race` 测试
+3. 文档更新要求：
+   - 同步修改示例代码
+   - 更新版本号标记
+   - 维护变更日志
 
-## 贡献
-欢迎提交 Issue 或 PR，请先阅读：
-1. 使用 `gofmt` 格式化代码
-2. 添加必要的测试用例
-3. 更新相关文档
-
-## 许可证
-MIT License © 2024 k3vi-07
+## 授权许可
+MIT License © 2024 [你的名字]
