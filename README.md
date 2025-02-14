@@ -42,10 +42,10 @@
 ### 安装方式
 ```bash
 # 源码安装
-go install github.com/yourname/ollama-checker@latest
+go install github.com/k3vi-07/ollama-checker@latest
 
 # 二进制安装
-curl -LO https://example.com/ollama-checker && chmod +x ollama-checker
+https://github.com/k3vi-07/ollama-checker
 ```
 
 ### 使用示例
